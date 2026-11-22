@@ -644,12 +644,17 @@ impl Service {
             let recently_probed =
                 self.full_probe.last_probe + UNAVAILABILITY_TRUST_DURATION > Instant::now();
             let protocol = self.config.protocol;
+            let udp = matches!(protocol, Protocol::Udp);
+            // Renew the active PMP lease on the gateway that actually granted it.
+            let renew_pmp = udp
+                && matches!(self.current_mapping.active(), Some(mapping::Mapping::NatPmp(m))
+                if m.matches_gateway(local_ip, gateway));
             // strategy:
             // 1. check the available services and prefer pcp, then nat_pmp then upnp since it's
             //    the most unreliable, but possibly the most deployed one
             // 2. if no service was available, fallback to upnp if enabled, followed by pcp and
             //    nat_pmp
-            self.mapping_task = if pcp {
+            self.mapping_task = if pcp && !renew_pmp {
                 // try pcp if available first
                 let task = mapping::Mapping::new_pcp(
                     protocol,
@@ -657,11 +662,12 @@ impl Service {
                     local_port,
                     gateway,
                     external_addr,
+                    udp && nat_pmp && self.current_mapping.active().is_none(),
                 );
                 Some(AbortOnDropHandle::new(tokio::spawn(
                     task.instrument(info_span!("pcp")),
                 )))
-            } else if nat_pmp {
+            } else if nat_pmp || renew_pmp {
                 // next nat_pmp if available
                 let task = mapping::Mapping::new_nat_pmp(
                     protocol,
@@ -701,6 +707,7 @@ impl Service {
                     local_port,
                     gateway,
                     external_addr,
+                    false,
                 );
 
                 Some(AbortOnDropHandle::new(tokio::spawn(

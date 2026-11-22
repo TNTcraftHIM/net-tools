@@ -79,6 +79,10 @@ pub(super) struct CurrentMapping<M = super::mapping::Mapping> {
 }
 
 impl<M: Mapping> CurrentMapping<M> {
+    pub(super) fn active(&self) -> Option<&M> {
+        self.mapping.as_ref().map(|active| &active.mapping)
+    }
+
     /// Creates a new [`CurrentMapping`] and returns the watcher over its external address.
     pub(super) fn new(metrics: Arc<Metrics>) -> (Self, watch::Receiver<Option<SocketAddrV4>>) {
         let (address_tx, address_rx) = watch::channel(None);
@@ -161,9 +165,7 @@ impl<M: Mapping> CurrentMapping<M> {
     }
 
     pub(crate) fn external(&self) -> Option<(Ipv4Addr, NonZeroU16)> {
-        self.mapping
-            .as_ref()
-            .map(|mapping| mapping.mapping.external())
+        self.active().map(Mapping::external)
     }
 }
 

@@ -62,6 +62,21 @@ pub enum Error {
     Protocol { source: protocol::Error },
 }
 
+impl Error {
+    pub(crate) fn unsupported_opcode(&self) -> bool {
+        matches!(
+            self,
+            Self::Protocol {
+                source: protocol::Error::ErrorCode {
+                    source: protocol::ErrorCode::UnsuppOpcode,
+                    ..
+                },
+                ..
+            }
+        )
+    }
+}
+
 impl super::mapping::PortMapped for Mapping {
     fn external(&self) -> (Ipv4Addr, NonZeroU16) {
         (self.external_address, self.external_port)

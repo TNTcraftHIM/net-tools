@@ -60,6 +60,10 @@ impl super::mapping::PortMapped for Mapping {
 }
 
 impl Mapping {
+    pub(super) fn matches_gateway(&self, local_ip: Ipv4Addr, gateway: Ipv4Addr) -> bool {
+        self.local_ip == local_ip && self.gateway == gateway
+    }
+
     /// Attempt to register a new mapping with the NAT-PMP server on the provided gateway.
     pub async fn new(
         protocol: Protocol,

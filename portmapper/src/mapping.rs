@@ -45,11 +45,15 @@ impl Mapping {
         local_port: NonZeroU16,
         gateway: Ipv4Addr,
         external_addr: Option<(Ipv4Addr, NonZeroU16)>,
+        nat_pmp_available: bool,
     ) -> Result<Self, Error> {
-        pcp::Mapping::new(protocol, local_ip, local_port, gateway, external_addr)
-            .await
-            .map(Self::Pcp)
-            .map_err(Error::from)
+        match pcp::Mapping::new(protocol, local_ip, local_port, gateway, external_addr).await {
+            Ok(mapping) => Ok(Self::Pcp(mapping)),
+            Err(error) if nat_pmp_available && error.unsupported_opcode() => {
+                Self::new_nat_pmp(protocol, local_ip, local_port, gateway, external_addr).await
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Create a new NAT-PMP mapping.

@@ -196,12 +196,18 @@ pub struct Interface {
     addrs: Vec<IpNet>,
 }
 
-impl PartialEq for Interface {
-    fn eq(&self, other: &Self) -> bool {
+impl Interface {
+    fn same_link(&self, other: &Self) -> bool {
         self.index == other.index
             && self.name == other.name
             && self.flags == other.flags
             && self.mac_addr == other.mac_addr
+    }
+}
+
+impl PartialEq for Interface {
+    fn eq(&self, other: &Self) -> bool {
+        self.same_link(other) && same_prefixes(&self.addrs, &other.addrs, |_| true)
     }
 }
 
@@ -333,7 +339,7 @@ impl State {
             let Some(i2) = self.interfaces.get(iname) else {
                 return true;
             };
-            if i != i2 || !prefixes_major_equal(i.addrs(), i2.addrs()) {
+            if !i.same_link(i2) || !same_prefixes(&i.addrs, &i2.addrs, is_interesting_prefix) {
                 return true;
             }
         }
@@ -411,27 +417,13 @@ impl HomeRouter {
     }
 }
 
-/// Checks whether `a` and `b` are equal after ignoring uninteresting
-/// things, like link-local, loopback and multicast addresses.
-fn prefixes_major_equal(a: impl Iterator<Item = IpNet>, b: impl Iterator<Item = IpNet>) -> bool {
-    fn is_interesting(p: &IpNet) -> bool {
-        let a = p.addr();
-        if is_link_local(a) || a.is_loopback() || a.is_multicast() {
-            return false;
-        }
-        true
-    }
+fn is_interesting_prefix(prefix: &IpNet) -> bool {
+    let addr = prefix.addr();
+    !is_link_local(addr) && !addr.is_loopback() && !addr.is_multicast()
+}
 
-    let mut a = a.filter(is_interesting);
-    let mut b = b.filter(is_interesting);
-
-    loop {
-        match (a.next(), b.next()) {
-            (None, None) => return true,
-            (Some(a), Some(b)) if a == b => continue,
-            _ => return false,
-        }
-    }
+fn same_prefixes(a: &[IpNet], b: &[IpNet], include: impl Fn(&IpNet) -> bool) -> bool {
+    a.iter().all(|p| !include(p) || b.contains(p)) && b.iter().all(|p| !include(p) || a.contains(p))
 }
 
 #[cfg(test)]
@@ -487,31 +479,32 @@ mod tests {
         let a2 = IpNet::V4(Ipv4Net::new(Ipv4Addr::new(10, 0, 0, 1), 8).unwrap());
         let a3 = IpNet::V4(Ipv4Net::new(Ipv4Addr::new(172, 16, 0, 1), 16).unwrap());
 
-        // equal lists
-        assert!(prefixes_major_equal(
-            vec![a1.clone(), a2.clone()].into_iter(),
-            vec![a1.clone(), a2.clone()].into_iter(),
+        let equal = |a: &[IpNet], b: &[IpNet]| same_prefixes(a, b, is_interesting_prefix);
+        assert!(equal(&[a1.clone(), a2.clone()], &[a2.clone(), a1.clone()]));
+        assert!(equal(&[], &[]));
+        assert!(!equal(&[a1.clone()], &[a2.clone()]));
+        assert!(!equal(
+            &[a1.clone(), a2.clone(), a3.clone()],
+            &[a1.clone(), a2.clone()]
         ));
+        assert!(!equal(&[a1.clone(), a2.clone()], &[a1, a2, a3]));
+    }
 
-        // both empty
-        assert!(prefixes_major_equal(std::iter::empty(), std::iter::empty(),));
-
-        // different prefixes
-        assert!(!prefixes_major_equal(
-            vec![a1.clone()].into_iter(),
-            vec![a2.clone()].into_iter(),
-        ));
-
-        // a has extra prefix
-        assert!(!prefixes_major_equal(
-            vec![a1.clone(), a2.clone(), a3.clone()].into_iter(),
-            vec![a1.clone(), a2.clone()].into_iter(),
-        ));
-
-        // b has extra prefix
-        assert!(!prefixes_major_equal(
-            vec![a1.clone(), a2.clone()].into_iter(),
-            vec![a1.clone(), a2.clone(), a3.clone()].into_iter(),
-        ));
+    #[test]
+    fn interface_equality_tracks_dad_and_ignores_address_order() {
+        let mut original = Interface::fake();
+        original.addrs.push(IpNet::V6 {
+            net: "2001:db8::1/64".parse().unwrap(),
+            scope_id: 0,
+            flags: Ipv6AddrFlags::default(),
+        });
+        let mut changed = original.clone();
+        changed.addrs.reverse();
+        assert_eq!(original, changed);
+        let IpNet::V6 { flags, .. } = &mut changed.addrs[0] else {
+            unreachable!()
+        };
+        flags.tentative = true;
+        assert_ne!(original, changed);
     }
 }
