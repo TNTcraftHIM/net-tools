@@ -638,97 +638,110 @@ impl Service {
                 Err(e) => return debug!("can't get mapping: {e}"),
             };
 
-            let ProbeOutput { upnp, pcp, nat_pmp } = self.full_probe.output();
+            self.start_mapping(local_ip, local_port, gateway, external_addr);
+        }
+    }
 
-            debug!("getting a port mapping for {local_ip}:{local_port} -> {external_addr:?}");
-            let recently_probed =
-                self.full_probe.last_probe + UNAVAILABILITY_TRUST_DURATION > Instant::now();
-            let protocol = self.config.protocol;
-            let udp = matches!(protocol, Protocol::Udp);
-            // Renew the active PMP lease on the gateway that actually granted it.
-            let renew_pmp = udp
-                && matches!(self.current_mapping.active(), Some(mapping::Mapping::NatPmp(m))
-                if m.matches_gateway(local_ip, gateway));
-            // strategy:
-            // 1. check the available services and prefer pcp, then nat_pmp then upnp since it's
-            //    the most unreliable, but possibly the most deployed one
-            // 2. if no service was available, fallback to upnp if enabled, followed by pcp and
-            //    nat_pmp
-            self.mapping_task = if pcp && !renew_pmp {
-                // try pcp if available first
-                let task = mapping::Mapping::new_pcp(
-                    protocol,
-                    local_ip,
-                    local_port,
-                    gateway,
-                    external_addr,
-                    udp && nat_pmp && self.current_mapping.active().is_none(),
-                );
-                Some(AbortOnDropHandle::new(tokio::spawn(
-                    task.instrument(info_span!("pcp")),
-                )))
-            } else if nat_pmp || renew_pmp {
-                // next nat_pmp if available
-                let task = mapping::Mapping::new_nat_pmp(
-                    protocol,
-                    local_ip,
-                    local_port,
-                    gateway,
-                    external_addr,
-                );
-                Some(AbortOnDropHandle::new(tokio::spawn(
-                    task.instrument(info_span!("pmp")),
-                )))
-            } else if upnp || self.config.enable_upnp {
-                // next upnp if available or enabled
-                let external_port = external_addr.map(|(_addr, port)| port);
-                let gateway = self
-                    .full_probe
-                    .last_upnp_gateway_addr
-                    .as_ref()
-                    .map(|(gateway, _last_seen)| gateway.clone());
-                let task = mapping::Mapping::new_upnp(
-                    protocol,
-                    local_ip,
-                    local_port,
-                    gateway,
-                    external_port,
-                );
+    fn start_mapping(
+        &mut self,
+        local_ip: Ipv4Addr,
+        local_port: NonZeroU16,
+        gateway: Ipv4Addr,
+        external_addr: Option<(Ipv4Addr, NonZeroU16)>,
+    ) {
+        let ProbeOutput { upnp, pcp, nat_pmp } = self.full_probe.output();
 
-                Some(AbortOnDropHandle::new(tokio::spawn(
-                    task.instrument(info_span!("upnp")),
-                )))
-            } else if !recently_probed && self.config.enable_pcp {
-                // if no service is available and the default fallback (upnp) is disabled, try pcp
-                // first
-                let task = mapping::Mapping::new_pcp(
-                    protocol,
-                    local_ip,
-                    local_port,
-                    gateway,
-                    external_addr,
-                    false,
-                );
-
-                Some(AbortOnDropHandle::new(tokio::spawn(
-                    task.instrument(info_span!("pcp")),
-                )))
-            } else if !recently_probed && self.config.enable_nat_pmp {
-                // finally try nat_pmp if enabled
-                let task = mapping::Mapping::new_nat_pmp(
-                    protocol,
-                    local_ip,
-                    local_port,
-                    gateway,
-                    external_addr,
-                );
-                Some(AbortOnDropHandle::new(tokio::spawn(
-                    task.instrument(info_span!("pmp")),
-                )))
-            } else {
-                // give up
-                return;
+        debug!("getting a port mapping for {local_ip}:{local_port} -> {external_addr:?}");
+        let recently_probed =
+            self.full_probe.last_probe + UNAVAILABILITY_TRUST_DURATION > Instant::now();
+        let protocol = self.config.protocol;
+        let udp = matches!(protocol, Protocol::Udp);
+        // Renew the active PMP lease on the gateway that actually granted it.
+        let renew_pmp = udp
+            && matches!(self.current_mapping.active(), Some(mapping::Mapping::NatPmp(m))
+            if m.matches_gateway(local_ip, gateway));
+        // strategy:
+        // 1. check the available services and prefer pcp, then nat_pmp then upnp since it's
+        //    the most unreliable, but possibly the most deployed one
+        // 2. if no service was available, fallback to upnp if enabled, followed by pcp and
+        //    nat_pmp
+        let pcp_nonce = match self.current_mapping.active() {
+            Some(mapping::Mapping::Pcp(mapping)) => {
+                mapping.nonce_for(local_ip, local_port, gateway)
             }
+            _ => None,
+        };
+        self.mapping_task = if (pcp || pcp_nonce.is_some()) && !renew_pmp {
+            // try pcp if available first
+            let task = mapping::Mapping::new_pcp(
+                protocol,
+                local_ip,
+                local_port,
+                gateway,
+                external_addr,
+                udp && nat_pmp && self.current_mapping.active().is_none(),
+                pcp_nonce,
+            );
+            Some(AbortOnDropHandle::new(tokio::spawn(
+                task.instrument(info_span!("pcp")),
+            )))
+        } else if nat_pmp || renew_pmp {
+            // next nat_pmp if available
+            let task = mapping::Mapping::new_nat_pmp(
+                protocol,
+                local_ip,
+                local_port,
+                gateway,
+                external_addr,
+            );
+            Some(AbortOnDropHandle::new(tokio::spawn(
+                task.instrument(info_span!("pmp")),
+            )))
+        } else if upnp || self.config.enable_upnp {
+            // next upnp if available or enabled
+            let external_port = external_addr.map(|(_addr, port)| port);
+            let gateway = self
+                .full_probe
+                .last_upnp_gateway_addr
+                .as_ref()
+                .map(|(gateway, _last_seen)| gateway.clone());
+            let task =
+                mapping::Mapping::new_upnp(protocol, local_ip, local_port, gateway, external_port);
+
+            Some(AbortOnDropHandle::new(tokio::spawn(
+                task.instrument(info_span!("upnp")),
+            )))
+        } else if !recently_probed && self.config.enable_pcp {
+            // if no service is available and the default fallback (upnp) is disabled, try pcp
+            // first
+            let task = mapping::Mapping::new_pcp(
+                protocol,
+                local_ip,
+                local_port,
+                gateway,
+                external_addr,
+                false,
+                pcp_nonce,
+            );
+
+            Some(AbortOnDropHandle::new(tokio::spawn(
+                task.instrument(info_span!("pcp")),
+            )))
+        } else if !recently_probed && self.config.enable_nat_pmp {
+            // finally try nat_pmp if enabled
+            let task = mapping::Mapping::new_nat_pmp(
+                protocol,
+                local_ip,
+                local_port,
+                gateway,
+                external_addr,
+            );
+            Some(AbortOnDropHandle::new(tokio::spawn(
+                task.instrument(info_span!("pmp")),
+            )))
+        } else {
+            // give up
+            return;
         }
     }
 
@@ -807,3 +820,6 @@ async fn ip_and_gateway() -> Result<(Ipv4Addr, Ipv4Addr), ProbeError> {
 
     Ok((local_ip, gateway))
 }
+
+#[cfg(test)]
+mod tests;

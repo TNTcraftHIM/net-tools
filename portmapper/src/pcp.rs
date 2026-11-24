@@ -88,6 +88,16 @@ impl super::mapping::PortMapped for Mapping {
 }
 
 impl Mapping {
+    pub(super) fn nonce_for(
+        &self,
+        local_ip: Ipv4Addr,
+        local_port: NonZeroU16,
+        gateway: Ipv4Addr,
+    ) -> Option<[u8; 12]> {
+        (self.local_ip == local_ip && self.local_port == local_port && self.gateway == gateway)
+            .then_some(self.nonce)
+    }
+
     /// Attempt to registered a new mapping with the PCP server on the provided gateway.
     pub async fn new(
         protocol: Protocol,
@@ -95,13 +105,17 @@ impl Mapping {
         local_port: NonZeroU16,
         gateway: Ipv4Addr,
         preferred_external_address: Option<(Ipv4Addr, NonZeroU16)>,
+        nonce: Option<[u8; 12]>,
     ) -> Result<Self, Error> {
         // create the socket and send the request
         let socket = UdpSocket::bind_full((local_ip, 0))?;
         socket.connect((gateway, protocol::SERVER_PORT).into())?;
 
-        let mut nonce = [0u8; 12];
-        rand::rng().fill_bytes(&mut nonce);
+        let nonce = nonce.unwrap_or_else(|| {
+            let mut nonce = [0u8; 12];
+            rand::rng().fill_bytes(&mut nonce);
+            nonce
+        });
 
         let (requested_address, requested_port) = match preferred_external_address {
             Some((ip, port)) => (Some(ip), Some(port.into())),
